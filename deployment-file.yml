@@ -1,0 +1,3 @@
+template-file-path: ./IamAutomation.yml
+Name: 'gitsync'
+Project: 'Demo'
