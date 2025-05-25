@@ -1,0 +1,214 @@
+Description: "Automation of IAM user creation with CloudFormation"
+Resources:
+  OneTimePassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: One time password for generated users
+      Name: OneTimePassword
+      GenerateSecretString:
+        ExcludeLowercase: false
+        ExcludeNumbers: false
+        ExcludePunctuation: false
+        ExcludeUppercase: false
+        IncludeSpace: false
+        PasswordLength: 12
+        RequireEachIncludedType: true
+
+  S3UserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: s3-user-group
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+  EC2UserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: ec2-user-group
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+
+  Ec2User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: ec2-user
+      Groups:
+        - !Ref EC2UserGroup
+      LoginProfile:
+        Password: !Join [ '', [ '{{resolve:secretsmanager:', !Ref OneTimePassword, '}}' ] ]
+        PasswordResetRequired: true
+      Tags:
+        - Key: Email
+          Value: ec2user@example.com
+
+  S3User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: s3-user
+      Groups:
+        - !Ref S3UserGroup
+      LoginProfile:
+        Password: !Join [ '', [ '{{resolve:secretsmanager:', !Ref OneTimePassword, '}}' ] ]
+        PasswordResetRequired: true
+      Tags:
+        - Key: Email
+          Value: s3user@example.com
+
+  S3UserEmail:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /iam/s3-user/email
+      Type: String
+      Value: s3user@example.com
+      Description: "Email for s3-user"
+
+  Ec2UserEmail:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /iam/ec2-user/email
+      Type: String
+      Value: ec2user@example.com
+      Description: "Email for ec2-user"
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: UserCreationNotificationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - secretsmanager:GetSecretValue
+                  - iam:GetUser
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/iam/*'
+                  - !Ref OneTimePassword
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:user/*'
+
+  UserCreationNotificationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: UserCreationNotificationFunction
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+          import os
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          # Force log group creation by writing an initial log
+          print("Lambda function initialized.")
+          logger.info("Lambda function initialized - CloudWatch log group should be created.")
+          
+          def handler(event, context):
+              logger.info("Received event: " + json.dumps(event))
+          
+              # Extract username from CloudTrail event
+              detail = event.get('detail', {})
+              request_parameters = detail.get('requestParameters', {})
+              username = request_parameters.get('userName', '')
+          
+              if not username:
+                  logger.error("Username not found in event")
+                  return
+          
+              # Get services
+              ssm = boto3.client('ssm')
+              secrets_manager = boto3.client('secretsmanager')
+          
+              try:
+                  # Get user email from Parameter Store
+                  email_param = ssm.get_parameter(Name=f'/iam/{username}/email')
+                  email = email_param['Parameter']['Value']
+          
+                  # Get one-time password from Secrets Manager
+                  password_secret = secrets_manager.get_secret_value(SecretId='OneTimePassword')
+                  password = password_secret['SecretString']
+          
+                  # Log the user creation info (in a real scenario, you would send this via email/SNS)
+                  logger.info(f"New user created: {username}")
+                  logger.info(f"User email: {email}")
+                  logger.info(f"Temporary password: {password}")
+          
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps(f'Successfully processed user creation for {username}')
+                  }
+              except Exception as e:
+                  logger.error(f"Error processing user creation: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+
+  UserCreationEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: IAMUserCreationRule
+      Description: "Rule to detect IAM user creation events"
+      EventPattern:
+        source:
+          - aws.iam
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - iam.amazonaws.com
+          eventName:
+            - CreateUser
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt UserCreationNotificationFunction.Arn
+          Id: UserCreationTarget
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref UserCreationNotificationFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UserCreationEventRule.Arn
+
+Outputs:
+  OneTimePasswordARN:
+    Description: "ARN of the one-time password secret"
+    Value: !Ref OneTimePassword
+
+  S3UserName:
+    Description: "Name of the S3 user"
+    Value: !Ref S3User
+
+  EC2UserName:
+    Description: "Name of the EC2 user"
+    Value: !Ref Ec2User
+
+  S3UserEmail:
+    Description: "Email of the S3 user"
+    Value: !GetAtt S3UserEmail.Value
+
+  EC2UserEmail:
+    Description: "Email of the EC2 user"
+    Value: !GetAtt Ec2UserEmail.Value
+
+  LambdaFunction:
+    Description: "Lambda function for user creation notification"
+    Value: !Ref UserCreationNotificationFunction
