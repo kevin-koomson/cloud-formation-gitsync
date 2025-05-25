@@ -103,62 +103,60 @@ Resources:
       FunctionName: UserCreationNotificationFunction
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
-      Runtime: python3.9
+      Runtime: nodejs18.x
       Timeout: 30
       Code:
         ZipFile: |
-          import boto3
-          import json
-          import logging
-          import os
-          
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
-          
-          # Force log group creation by writing an initial log
-          print("Lambda function initialized.")
-          logger.info("Lambda function initialized - CloudWatch log group should be created.")
-          
-          def handler(event, context):
-              logger.info("Received event: " + json.dumps(event))
-          
-              # Extract username from CloudTrail event
-              detail = event.get('detail', {})
-              request_parameters = detail.get('requestParameters', {})
-              username = request_parameters.get('userName', '')
-          
-              if not username:
-                  logger.error("Username not found in event")
-                  return
-          
-              # Get services
-              ssm = boto3.client('ssm')
-              secrets_manager = boto3.client('secretsmanager')
-          
-              try:
-                  # Get user email from Parameter Store
-                  email_param = ssm.get_parameter(Name=f'/iam/{username}/email')
-                  email = email_param['Parameter']['Value']
-          
-                  # Get one-time password from Secrets Manager
-                  password_secret = secrets_manager.get_secret_value(SecretId='OneTimePassword')
-                  password = password_secret['SecretString']
-          
-                  # Log the user creation info (in a real scenario, you would send this via email/SNS)
-                  logger.info(f"New user created: {username}")
-                  logger.info(f"User email: {email}")
-                  logger.info(f"Temporary password: {password}")
-          
-                  return {
-                      'statusCode': 200,
-                      'body': json.dumps(f'Successfully processed user creation for {username}')
-                  }
-              except Exception as e:
-                  logger.error(f"Error processing user creation: {str(e)}")
-                  return {
-                      'statusCode': 500,
-                      'body': json.dumps(f'Error: {str(e)}')
-                  }
+          const AWS = require('aws-sdk');
+
+          const ssm = new AWS.SSM();
+          const secretsManager = new AWS.SecretsManager();
+
+          console.log("Lambda function initialized.");
+          console.info("Lambda function initialized - CloudWatch log group should be created.");
+
+          exports.handler = async (event) => {
+            console.info("Received event: " + JSON.stringify(event));
+
+            const detail = event.detail || {};
+            const requestParameters = detail.requestParameters || {};
+            const username = requestParameters.userName || '';
+
+            if (!username) {
+              console.error("Username not found in event");
+              return;
+            }
+
+            try {
+              // Get user email from Parameter Store
+              const emailParam = await ssm.getParameter({
+                Name: `/iam/${username}/email`
+              }).promise();
+              const email = emailParam.Parameter.Value;
+
+              // Get one-time password from Secrets Manager
+              const passwordSecret = await secretsManager.getSecretValue({
+                SecretId: 'OneTimePassword'
+              }).promise();
+              const password = passwordSecret.SecretString;
+
+              console.info(`New user created: ${username}`);
+              console.info(`User email: ${email}`);
+              console.info(`Temporary password: ${password}`);
+
+              return {
+                statusCode: 200,
+                body: JSON.stringify(`Successfully processed user creation for ${username}`)
+              };
+            } catch (err) {
+              console.error(`Error processing user creation: ${err}`);
+              return {
+                statusCode: 500,
+                body: JSON.stringify(`Error: ${err}`)
+              };
+            }
+          };
+  
 
   UserCreationEventRule:
     Type: AWS::Events::Rule
